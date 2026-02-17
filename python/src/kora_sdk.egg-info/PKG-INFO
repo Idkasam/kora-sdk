@@ -1,0 +1,274 @@
+Metadata-Version: 2.4
+Name: kora-sdk
+Version: 1.1.0
+Summary: Python SDK for the Kora authorization engine — deterministic spend authorization for AI agents
+Author: Kora Protocol
+License: AGPL-3.0-or-later
+Project-URL: Homepage, https://github.com/kora-protocol/kora
+Project-URL: Repository, https://github.com/kora-protocol/kora
+Keywords: kora,authorization,ai-agents,spending,ed25519,deterministic,fintech
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Topic :: Security
+Classifier: Topic :: Software Development :: Libraries
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: pynacl>=1.5.0
+Requires-Dist: requests>=2.28.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# Kora Python SDK
+
+Python SDK for the Kora authorization engine. Handles Ed25519 signing, nonce generation, canonical JSON serialization, idempotent retry, and offline seal verification.
+
+## Installation
+
+```bash
+pip install kora-sdk
+```
+
+Or install from source:
+
+```bash
+pip install -e sdk/python
+```
+
+**Requirements:** Python 3.9+, PyNaCl >= 1.5.0, requests >= 2.28.0
+
+## Quick Start
+
+```python
+from kora import Kora
+
+# Initialize with the secret key returned from agent creation
+kora = Kora("kora_agent_sk_...")
+
+# Authorize a spend
+auth = kora.authorize(
+    mandate="mandate_abc123",
+    amount=50_00,        # EUR 50.00
+    currency="EUR",
+    vendor="aws",
+    category="compute",  # required if mandate has category_allowlist
+)
+
+if auth.approved:
+    print(f"Approved: {auth.decision_id}")
+    print(f"Daily remaining: {auth.limits_after_approval['daily_remaining_cents']}")
+else:
+    print(f"Denied: {auth.reason_code}")
+    print(f"Hint: {auth.denial.hint}")
+```
+
+## Usage
+
+### Authorize a Spend
+
+```python
+from kora import Kora
+
+kora = Kora(
+    "kora_agent_sk_...",
+    base_url="http://localhost:8000",  # default
+    ttl=300,          # default TTL in seconds
+    max_retries=2,    # automatic idempotent retry on network error
+)
+
+result = kora.authorize(
+    mandate="mandate_abc123",
+    amount=50_00,
+    currency="EUR",
+    vendor="aws",
+    category="compute",
+)
+```
+
+### Result Properties
+
+```python
+result.approved        # bool — True if APPROVED
+result.decision        # "APPROVED" or "DENIED"
+result.decision_id     # UUID of the authorization decision
+result.reason_code     # "OK", "DAILY_LIMIT_EXCEEDED", etc.
+result.executable      # bool — True if payment can be executed
+result.is_valid        # bool — True if TTL has not expired
+result.is_enforced     # bool — True if enforcement_mode == "enforce"
+result.enforcement_mode  # "enforce" or "log_only"
+
+# On denial:
+result.denial.hint            # Human-readable suggestion
+result.denial.actionable      # Machine-readable corrective values
+result.denial.failed_check    # Which pipeline step failed
+
+# On approval:
+result.limits_after_approval  # Remaining daily/monthly budget
+
+# Evaluation trace:
+result.evaluation_trace.steps        # List of pipeline step results
+result.evaluation_trace.total_duration_ms  # Total evaluation time
+
+# Notary seal:
+result.notary_seal.signature    # Ed25519 signature (base64)
+result.notary_seal.public_key_id
+result.notary_seal.algorithm    # "Ed25519"
+
+# Trace URL (for debugging denials):
+result.trace_url  # e.g. http://localhost:8000/v1/authorizations/<id>/trace
+```
+
+### Handle Denials
+
+```python
+result = kora.authorize(
+    mandate="mandate_abc123",
+    amount=999_99,
+    currency="EUR",
+    vendor="aws",
+)
+
+if not result.approved:
+    print(f"Denied: {result.reason_code}")
+    print(f"Hint: {result.denial.hint}")
+
+    # Machine-readable corrective values
+    if result.reason_code == "DAILY_LIMIT_EXCEEDED":
+        available = result.denial.actionable["available_cents"]
+        print(f"Available budget: {available} cents")
+
+    if result.reason_code == "VENDOR_NOT_ALLOWED":
+        allowed = result.denial.actionable["allowed_vendors"]
+        print(f"Allowed vendors: {allowed}")
+
+    # Full trace URL for debugging
+    print(f"Trace: {result.trace_url}")
+```
+
+### Verify Notary Seal (Offline)
+
+```python
+from base64 import b64decode
+
+# Kora's public key (from your deployment)
+kora_public_key = b64decode("...")
+
+is_valid = kora.verify_seal(result, kora_public_key)
+print(f"Seal valid: {is_valid}")
+```
+
+### Simulation Mode
+
+Test denial scenarios without affecting state. Requires an admin key with `simulation_access=true`.
+
+```python
+result = kora.authorize(
+    mandate="mandate_abc123",
+    amount=100,
+    currency="EUR",
+    vendor="aws",
+    simulate="DAILY_LIMIT_EXCEEDED",
+    admin_key="kora_admin_...",
+)
+
+assert result.simulated is True
+assert result.decision == "DENIED"
+assert result.reason_code == "DAILY_LIMIT_EXCEEDED"
+assert result.notary_seal is None  # no seal in simulation
+```
+
+### OpenAI Function Tool Schema
+
+Generate an OpenAI-compatible function tool definition for use with LLM agents:
+
+```python
+tool = kora.as_tool("mandate_abc123")
+# Returns:
+# {
+#     "type": "function",
+#     "function": {
+#         "name": "kora_authorize_spend",
+#         "description": "Authorize a spend against a Kora mandate...",
+#         "parameters": {
+#             "type": "object",
+#             "properties": {
+#                 "amount_cents": {"type": "integer", "description": "..."},
+#                 "currency": {"type": "string", "description": "..."},
+#                 "vendor_id": {"type": "string", "description": "..."},
+#             },
+#             "required": ["amount_cents", "currency", "vendor_id"]
+#         }
+#     }
+# }
+
+# With category enum constraint:
+tool = kora.as_tool("mandate_abc123", category_enum=["compute", "api_services"])
+```
+
+Use with OpenAI:
+
+```python
+import openai
+
+client = openai.OpenAI()
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "Buy $50 of AWS compute"}],
+    tools=[kora.as_tool("mandate_abc123")],
+)
+```
+
+## Agent Self-Correction Pattern
+
+```python
+from kora import Kora
+
+kora = Kora("kora_agent_sk_...")
+
+# First attempt — too large
+auth = kora.authorize(mandate="mandate_abc123", amount=999_99, currency="EUR", vendor="aws")
+
+if not auth.approved and auth.reason_code == "DAILY_LIMIT_EXCEEDED":
+    # Read the actionable hint
+    available = auth.denial.actionable["available_cents"]
+    print(f"Budget available: {available} cents, retrying...")
+
+    # Retry with corrected amount
+    auth = kora.authorize(mandate="mandate_abc123", amount=available, currency="EUR", vendor="aws")
+    print(f"Second attempt: {auth.decision}")  # APPROVED
+```
+
+## API Reference
+
+### `Kora(key_string, base_url=None, ttl=300, max_retries=2)`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `key_string` | str | required | Agent secret key (`kora_agent_sk_...`) |
+| `base_url` | str | `http://localhost:8000` | Kora API base URL |
+| `ttl` | int | 300 | Default TTL for decisions (seconds) |
+| `max_retries` | int | 2 | Automatic retries on network error |
+
+### `kora.authorize(**kwargs) -> AuthorizationResult`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `mandate` | str | yes | Mandate ID |
+| `amount` | int | yes | Amount in cents |
+| `currency` | str | yes | 3-letter currency code |
+| `vendor` | str | yes | Vendor identifier |
+| `category` | str | no | Spending category |
+| `simulate` | str | no | Force denial reason code (simulation mode) |
+| `admin_key` | str | no | Admin key for simulation access |
+
+### `kora.verify_seal(result, public_key) -> bool`
+
+Verify the Ed25519 notary seal offline.
+
+### `kora.as_tool(mandate, category_enum=None) -> dict`
+
+Generate OpenAI function tool schema.
