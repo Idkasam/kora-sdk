@@ -28,22 +28,6 @@ const DEFAULT_SANDBOX_CONFIG: Required<{
   allowedVendors: null,              // null = all vendors allowed
 };
 
-const SANDBOX_PAYMENT = {
-  iban: 'XX00SANDBOX0000000001',
-  bic: 'SANDBOXXXX',
-  name: 'Sandbox Vendor',
-} as const;
-// NOTE: Sandbox currently returns payment-related fields (payment, executable)
-// for compatibility with the current server API response shape.
-// These fields are DEPRECATED and will be removed when the server API
-// drops payment_instruction from authorization responses (see
-// KORA_REMOVE_PAYMENT_INSTRUCTION.md). When that happens:
-//   - Delete this SANDBOX_PAYMENT object
-//   - Delete buildSandboxPayment()
-//   - Remove "payment" and "executable" keys from spend() return dict
-// Real vendor routing (IBANs, Stripe IDs, etc.) is a V2 executor concern.
-// These values are obviously fake and cannot be confused with real accounts.
-
 export class SandboxEngine {
   private readonly dailyLimit: number;
   private readonly monthlyLimit: number;
@@ -185,7 +169,6 @@ export class SandboxEngine {
     this.monthlySpent += amountCents;
     this.txCount += 1;
 
-    const shortId = randomUUID().replace(/-/g, '').slice(0, 8);
     const sigHex = randomUUID().replace(/-/g, '');
     const expires = new Date(now.getTime() + 300_000);
     const expiresIso = expires.toISOString().replace(/(\.\d{3})\d*Z$/, '$1Z');
@@ -198,11 +181,6 @@ export class SandboxEngine {
       message: `Approved: ${this.formatEuros(amountCents)} to ${vendor}`,
       suggestion: null,
       retry_with: null,
-      // FORWARD-COMPAT: payment + executable will be removed in next change.
-      // buildSandboxPayment() isolates this so removal is one-line.
-      payment: SandboxEngine.buildSandboxPayment(shortId),
-      executable: true,
-      // Forward-compat fields
       enforcement_mode: 'enforce',
       amount_cents: amountCents,
       currency,
@@ -232,21 +210,12 @@ export class SandboxEngine {
     };
   }
 
-  private static buildSandboxPayment(shortId: string): Record<string, string> {
-    return {
-      iban: SANDBOX_PAYMENT.iban,
-      bic: SANDBOX_PAYMENT.bic,
-      name: SANDBOX_PAYMENT.name,
-      reference: `KORA-SANDBOX-${shortId}`,
-    };
-  }
-
   private buildDenied(
     decisionId: string,
     nowIso: string,
-    _amountCents: number,
-    _currency: string,
-    _vendor: string,
+    amountCents: number,
+    currency: string,
+    vendor: string,
     reasonCode: string,
     message: string,
     suggestion: string | null,
@@ -260,14 +229,20 @@ export class SandboxEngine {
       message,
       suggestion,
       retry_with: retryWith,
-      payment: null,
-      executable: false,
+      enforcement_mode: 'enforce',
+      amount_cents: amountCents,
+      currency,
+      vendor_id: vendor,
       seal: null,
       raw: {
         sandbox: true,
         decision: 'DENIED',
         decision_id: decisionId,
         reason_code: reasonCode,
+        enforcement_mode: 'enforce',
+        amount_cents: amountCents,
+        currency,
+        vendor_id: vendor,
         evaluated_at: nowIso,
         limits_current: {
           daily_spent_cents: this.dailySpent,

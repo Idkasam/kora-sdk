@@ -27,14 +27,11 @@ export interface SpendResult {
   message: string;
   suggestion: string | null;
   retryWith: { amount_cents: number } | null;
-  payment: {
-    iban: string;
-    bic: string;
-    name: string;
-    reference: string | null;
-  } | null;
-  executable: boolean;
   seal: object | null;
+  enforcementMode: string;
+  amountCents: number | null;
+  currency: string | null;
+  vendorId: string | null;
   raw: object;
 }
 
@@ -179,17 +176,6 @@ export class Kora {
       }
     }
 
-    let payment: SpendResult['payment'] = null;
-    if (result.paymentInstruction) {
-      const pi = result.paymentInstruction;
-      payment = {
-        iban: pi.recipientIban ?? '',
-        bic: pi.recipientBic ?? '',
-        name: pi.recipientName ?? '',
-        reference: pi.paymentReference ?? null,
-      };
-    }
-
     const spendResult = buildSpendResult({
       approved,
       decisionId: result.decisionId,
@@ -198,9 +184,11 @@ export class Kora {
       message,
       suggestion,
       retryWith,
-      payment,
-      executable: result.executable,
       seal: result.notarySeal as object | null,
+      enforcementMode: result.enforcementMode,
+      amountCents: result.amountCents,
+      currency: result.currency,
+      vendorId: result.vendorId,
       raw: result as unknown as object,
     });
 
@@ -326,10 +314,14 @@ export class Kora {
 /**
  * Build SpendResult from a response dict.
  *
- * Tolerant of missing/extra fields — handles both current API shape
- * (payment_instruction, notary_seal, denial) and future shape
- * (no payment_instruction, enforcement_mode at root).
+ * Tolerant of missing/extra fields — handles both v1.3 API shape
+ * and old cached responses (pre-v1.3 with payment_instruction).
  * Used by spend() and sandbox.
+ *
+ * NOTE: Idempotent replays of pre-v1.3 authorizations may return the old
+ * response shape (with payment_instruction, without amount_cents at root).
+ * Defensive parsing pulls amount_cents/currency from payment_instruction
+ * as fallback if not found at root level.
  */
 export function buildSpendResult(raw: Record<string, any>): SpendResult {
   const approved = raw.approved ?? (raw.decision === 'APPROVED');
@@ -361,20 +353,16 @@ export function buildSpendResult(raw: Record<string, any>): SpendResult {
     }
   }
 
-  // Payment: from payment_instruction (API) or paymentInstruction (TS obj) or payment (sandbox)
-  const paymentData = raw.payment_instruction ?? raw.paymentInstruction ?? raw.payment ?? null;
-  let payment: SpendResult['payment'] = null;
-  if (paymentData && typeof paymentData === 'object') {
-    payment = {
-      iban: paymentData.iban ?? paymentData.recipient_iban ?? paymentData.recipientIban ?? '',
-      bic: paymentData.bic ?? paymentData.recipient_bic ?? paymentData.recipientBic ?? '',
-      name: paymentData.name ?? paymentData.recipient_name ?? paymentData.recipientName ?? '',
-      reference: paymentData.reference ?? paymentData.payment_reference ?? paymentData.paymentReference ?? null,
-    };
-  }
-
   // Seal: from seal (sandbox) or notary_seal (API) or notarySeal (TS obj)
   const seal = raw.seal ?? raw.notary_seal ?? raw.notarySeal ?? null;
+
+  // Defensive parsing for backward compat with pre-v1.3 cached responses:
+  // Old responses may have amount_cents/currency inside payment_instruction.
+  const piFallback = raw.payment_instruction ?? raw.paymentInstruction ?? {};
+  const enforcementMode = raw.enforcement_mode ?? raw.enforcementMode ?? 'enforce';
+  const amountCents = raw.amount_cents ?? raw.amountCents ?? piFallback.amount_cents ?? null;
+  const currency = raw.currency ?? piFallback.currency ?? null;
+  const vendorId = raw.vendor_id ?? raw.vendorId ?? null;
 
   return {
     approved,
@@ -384,9 +372,11 @@ export function buildSpendResult(raw: Record<string, any>): SpendResult {
     message,
     suggestion,
     retryWith,
-    payment,
-    executable: raw.executable ?? true,
     seal,
+    enforcementMode,
+    amountCents,
+    currency,
+    vendorId,
     raw: raw.raw ?? raw,
   };
 }

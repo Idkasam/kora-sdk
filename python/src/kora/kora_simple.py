@@ -37,9 +37,11 @@ class SpendResult:
     message: str
     suggestion: str | None
     retry_with: dict | None
-    payment: dict | None
-    executable: bool
     seal: dict | None
+    enforcement_mode: str
+    amount_cents: int | None
+    currency: str | None
+    vendor_id: str | None
     raw: dict
 
 
@@ -190,16 +192,6 @@ class Kora:
             if available is not None and available > 0:
                 retry_with = {"amount_cents": available}
 
-        payment = None
-        if result.payment_instruction:
-            pi = result.payment_instruction
-            payment = {
-                "iban": pi.recipient_iban,
-                "bic": pi.recipient_bic,
-                "name": pi.recipient_name,
-                "reference": pi.payment_reference,
-            }
-
         seal = None
         if result.notary_seal:
             seal = {
@@ -218,9 +210,11 @@ class Kora:
             "message": message,
             "suggestion": suggestion,
             "retry_with": retry_with,
-            "payment": payment,
-            "executable": result.executable,
             "seal": seal,
+            "enforcement_mode": result.enforcement_mode,
+            "amount_cents": result.amount_cents,
+            "currency": result.currency,
+            "vendor_id": result.vendor_id,
             "raw": _build_raw_dict(result),
         })
 
@@ -322,7 +316,6 @@ def _build_raw_dict(result: Any) -> dict:
         "agent_id": result.agent_id,
         "mandate_id": result.mandate_id,
         "evaluated_at": result.evaluated_at,
-        "executable": result.executable,
     }
     if result.amount_cents is not None:
         raw["amount_cents"] = result.amount_cents
@@ -338,10 +331,14 @@ def _build_raw_dict(result: Any) -> dict:
 def _build_spend_result(raw: dict) -> SpendResult:
     """Build SpendResult from a response dict.
 
-    Tolerant of missing/extra fields — handles both current API shape
-    (payment_instruction, notary_seal, denial) and future shape
-    (no payment_instruction, enforcement_mode at root).
+    Tolerant of missing/extra fields — handles both current v1.3 API shape
+    and old cached responses (pre-v1.3 with payment_instruction).
     Used by spend() and sandbox.
+
+    NOTE: Idempotent replays of pre-v1.3 authorizations may return the old
+    response shape (with payment_instruction, without amount_cents at root).
+    Defensive parsing pulls amount_cents/currency from payment_instruction
+    as fallback if not found at root level.
     """
     approved = raw.get("approved", raw.get("decision") == "APPROVED")
 
@@ -369,23 +366,22 @@ def _build_spend_result(raw: dict) -> SpendResult:
             if available is not None and available > 0:
                 retry_with = {"amount_cents": available}
 
-    # Payment: from payment_instruction (production API) or payment (sandbox/future)
-    payment_data = raw.get("payment_instruction") or raw.get("payment")
-    payment = None
-    if payment_data and isinstance(payment_data, dict):
-        payment = {
-            "iban": payment_data.get("iban") or payment_data.get("recipient_iban", ""),
-            "bic": payment_data.get("bic") or payment_data.get("recipient_bic", ""),
-            "name": payment_data.get("name") or payment_data.get("recipient_name", ""),
-            "reference": payment_data.get("reference", payment_data.get("payment_reference")),
-        }
-
     # Seal: from seal (sandbox) or notary_seal (production API)
     seal = raw.get("seal") or raw.get("notary_seal")
     if isinstance(seal, dict):
         seal = dict(seal)
     else:
         seal = None
+
+    # Defensive parsing for backward compat with pre-v1.3 cached responses:
+    # Old responses may have amount_cents/currency inside payment_instruction.
+    pi_fallback = raw.get("payment_instruction") or {}
+    if not isinstance(pi_fallback, dict):
+        pi_fallback = {}
+    enforcement_mode = raw.get("enforcement_mode", "enforce")
+    amount_cents = raw.get("amount_cents", pi_fallback.get("amount_cents"))
+    currency = raw.get("currency") or pi_fallback.get("currency")
+    vendor_id = raw.get("vendor_id", None)
 
     return SpendResult(
         approved=approved,
@@ -395,9 +391,11 @@ def _build_spend_result(raw: dict) -> SpendResult:
         message=message,
         suggestion=suggestion,
         retry_with=retry_with,
-        payment=payment,
-        executable=raw.get("executable", True),
         seal=seal,
+        enforcement_mode=enforcement_mode,
+        amount_cents=amount_cents,
+        currency=currency,
+        vendor_id=vendor_id,
         raw=raw.get("raw", raw),
     )
 

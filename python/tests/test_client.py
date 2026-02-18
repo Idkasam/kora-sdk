@@ -38,7 +38,6 @@ class TestParseResponse:
                 "daily_limit_cents": 100000,
                 "monthly_limit_cents": 500000,
             },
-            "executable": True,
             "enforcement_mode": "enforce",
         }
 
@@ -49,7 +48,7 @@ class TestParseResponse:
         assert result.decision == "APPROVED"
         assert result.reason_code == "OK"
         assert result.approved is True
-        assert result.executable is True
+        assert result.enforcement_mode == "enforce"
         assert result.is_enforced is True
         assert result.is_valid is True  # expires in 2099
         assert result.notary_seal is not None
@@ -99,7 +98,7 @@ class TestParseResponse:
             "reason_code": "OK",
             "evaluated_at": "2020-01-01T00:00:00+00:00",
             "expires_at": "2020-01-01T00:05:00+00:00",
-            "executable": True,
+            "enforcement_mode": "enforce",
         }
 
         result = parse_response(raw)
@@ -111,12 +110,11 @@ class TestParseResponse:
             "reason_code": "OK",
             "evaluated_at": "2026-02-10T08:00:00+00:00",
             "enforcement_mode": "log_only",
-            "executable": False,
         }
 
         result = parse_response(raw)
         assert result.is_enforced is False
-        assert result.executable is False
+        assert result.enforcement_mode == "log_only"
 
     def test_simulated_response(self):
         raw = {
@@ -125,13 +123,13 @@ class TestParseResponse:
             "evaluated_at": "2026-02-10T08:00:00+00:00",
             "simulated": True,
             "notary_seal": None,
-            "executable": False,
+            "enforcement_mode": "enforce",
         }
 
         result = parse_response(raw)
         assert result.simulated is True
         assert result.notary_seal is None
-        assert result.executable is False
+        assert result.enforcement_mode == "enforce"
 
     def test_evaluation_trace(self):
         raw = {

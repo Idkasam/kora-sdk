@@ -118,7 +118,7 @@ describe('Kora SDK E2E', () => {
     expect(result.reasonCode).toBe('OK');
     expect(result.decisionId).toBeTruthy();
     expect(result.intentId).toBeTruthy();
-    expect(result.executable).toBe(true);
+    expect(result.enforcementMode).toBe('enforce');
     expect(result.notarySeal).not.toBeNull();
   });
 
@@ -202,7 +202,7 @@ describe('Kora SDK E2E', () => {
     expect(result.decision).toBe('DENIED');
     expect(result.reasonCode).toBe('DAILY_LIMIT_EXCEEDED');
     expect(result.notarySeal).toBeNull();
-    expect(result.executable).toBe(false);
+    expect(result.enforcementMode).not.toBeNull();
   });
 
   it('asTool returns valid schema', () => {

@@ -37,11 +37,11 @@ def test_spend_approved():
     assert result.approved is True
     assert result.decision == "APPROVED"
     assert result.reason_code == "OK"
-    assert result.payment is not None
-    assert result.payment["iban"] == "XX00SANDBOX0000000001"
-    assert result.payment["bic"] == "SANDBOXXXX"
+    assert result.enforcement_mode == "enforce"
+    assert result.amount_cents == 5000
+    assert result.currency == "EUR"
+    assert result.vendor_id == "aws"
     assert result.seal is not None
-    assert result.executable is True
     assert result.suggestion is None
     assert result.retry_with is None
 
@@ -71,13 +71,15 @@ def test_spend_tracks_daily():
     assert budget.daily.remaining_cents == 200000
 
 
-def test_spend_all_vendors_same_iban():
-    """All vendors return same sandbox IBAN (routing is V2)."""
+def test_spend_all_vendors_return_vendor_id():
+    """All vendors return their respective vendor_id."""
     kora = Kora(sandbox=True)
     r1 = kora.spend("aws", 1000, "EUR")
     r2 = kora.spend("stripe", 1000, "EUR")
     r3 = kora.spend("random_vendor", 1000, "EUR")
-    assert r1.payment["iban"] == r2.payment["iban"] == r3.payment["iban"] == "XX00SANDBOX0000000001"
+    assert r1.vendor_id == "aws"
+    assert r2.vendor_id == "stripe"
+    assert r3.vendor_id == "random_vendor"
 
 
 # --- spend() denied ---
@@ -90,9 +92,8 @@ def test_deny_daily_limit():
     assert result.approved is False
     assert result.decision == "DENIED"
     assert result.reason_code == "DAILY_LIMIT_EXCEEDED"
-    assert result.payment is None
+    assert result.enforcement_mode == "enforce"
     assert result.seal is None
-    assert result.executable is False
     assert result.suggestion is not None
     assert "daily" in result.suggestion.lower() or "reduce" in result.suggestion.lower()
 

@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: kora-sdk
-Version: 1.1.0
+Version: 1.2.0
 Summary: Python SDK for the Kora authorization engine — deterministic spend authorization for AI agents
 Author: Kora Protocol
 License: AGPL-3.0-or-later

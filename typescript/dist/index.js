@@ -1,11 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sortKeysDeep = exports.buildSignedFields = exports.verifySeal = exports.verify = exports.sign = exports.canonicalize = exports.parseAgentKey = exports.formatAmount = exports.KoraDenialError = exports.KoraError = exports.Kora = exports.parseResponse = exports.KoraEngine = void 0;
+exports.sortKeysDeep = exports.buildSignedFields = exports.verifySeal = exports.verify = exports.sign = exports.canonicalize = exports.parseAgentKey = exports.formatAmount = exports.KoraDenialError = exports.KoraError = exports.KoraAuto = exports.Kora = exports.parseResponse = exports.KoraEngine = void 0;
 var client_js_1 = require("./client.js");
 Object.defineProperty(exports, "KoraEngine", { enumerable: true, get: function () { return client_js_1.Kora; } });
 Object.defineProperty(exports, "parseResponse", { enumerable: true, get: function () { return client_js_1.parseResponse; } });
 var simple_js_1 = require("./simple.js");
 Object.defineProperty(exports, "Kora", { enumerable: true, get: function () { return simple_js_1.Kora; } });
+var auto_js_1 = require("./auto.js");
+Object.defineProperty(exports, "KoraAuto", { enumerable: true, get: function () { return auto_js_1.KoraAuto; } });
 var errors_js_1 = require("./errors.js");
 Object.defineProperty(exports, "KoraError", { enumerable: true, get: function () { return errors_js_1.KoraError; } });
 Object.defineProperty(exports, "KoraDenialError", { enumerable: true, get: function () { return errors_js_1.KoraDenialError; } });

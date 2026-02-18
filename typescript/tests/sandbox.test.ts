@@ -30,11 +30,11 @@ describe('sandbox — spend approved', () => {
     expect(result.approved).toBe(true);
     expect(result.decision).toBe('APPROVED');
     expect(result.reasonCode).toBe('OK');
-    expect(result.payment).not.toBeNull();
-    expect(result.payment!.iban).toBe('XX00SANDBOX0000000001');
-    expect(result.payment!.bic).toBe('SANDBOXXXX');
+    expect(result.enforcementMode).toBe('enforce');
+    expect(result.amountCents).toBe(5000);
+    expect(result.currency).toBe('EUR');
+    expect(result.vendorId).toBe('aws');
     expect(result.seal).not.toBeNull();
-    expect(result.executable).toBe(true);
     expect(result.suggestion).toBeNull();
     expect(result.retryWith).toBeNull();
   });
@@ -61,14 +61,17 @@ describe('sandbox — spend approved', () => {
     expect(budget.daily.remainingCents).toBe(200000);
   });
 
-  it('all vendors return same sandbox IBAN', async () => {
+  it('all vendors return enforcementMode and correct vendorId', async () => {
     const kora = new Kora({ sandbox: true });
     const r1 = await kora.spend('aws', 1000, 'EUR');
     const r2 = await kora.spend('stripe', 1000, 'EUR');
     const r3 = await kora.spend('random_vendor', 1000, 'EUR');
-    expect(r1.payment!.iban).toBe('XX00SANDBOX0000000001');
-    expect(r2.payment!.iban).toBe('XX00SANDBOX0000000001');
-    expect(r3.payment!.iban).toBe('XX00SANDBOX0000000001');
+    expect(r1.enforcementMode).toBe('enforce');
+    expect(r2.enforcementMode).toBe('enforce');
+    expect(r3.enforcementMode).toBe('enforce');
+    expect(r1.vendorId).toBe('aws');
+    expect(r2.vendorId).toBe('stripe');
+    expect(r3.vendorId).toBe('random_vendor');
   });
 });
 
@@ -82,9 +85,8 @@ describe('sandbox — spend denied', () => {
     expect(result.approved).toBe(false);
     expect(result.decision).toBe('DENIED');
     expect(result.reasonCode).toBe('DAILY_LIMIT_EXCEEDED');
-    expect(result.payment).toBeNull();
+    expect(result.enforcementMode).toBe('enforce');
     expect(result.seal).toBeNull();
-    expect(result.executable).toBe(false);
     expect(result.suggestion).not.toBeNull();
   });
 

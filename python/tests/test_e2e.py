@@ -91,7 +91,7 @@ class TestKoraSDKE2E:
         assert result.reason_code == "OK"
         assert result.decision_id
         assert result.intent_id
-        assert result.executable is True
+        assert result.enforcement_mode == "enforce"
         assert result.notary_seal is not None
 
     def test_authorize_denied_daily_limit(self, e2e_setup):
@@ -158,7 +158,7 @@ class TestKoraSDKE2E:
         assert result.decision == "DENIED"
         assert result.reason_code == "DAILY_LIMIT_EXCEEDED"
         assert result.notary_seal is None
-        assert result.executable is False
+        assert result.enforcement_mode == "enforce"
 
     def test_as_tool_schema(self, e2e_setup):
         kora = Kora(e2e_setup["secret_key"], base_url=BASE_URL)

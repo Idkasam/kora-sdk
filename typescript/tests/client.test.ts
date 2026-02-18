@@ -31,7 +31,6 @@ describe('parseResponse', () => {
         daily_limit_cents: 100000,
         monthly_limit_cents: 500000,
       },
-      executable: true,
       enforcement_mode: 'enforce',
     };
 
@@ -42,7 +41,7 @@ describe('parseResponse', () => {
     expect(result.decision).toBe('APPROVED');
     expect(result.reasonCode).toBe('OK');
     expect(result.approved).toBe(true);
-    expect(result.executable).toBe(true);
+    expect(result.enforcementMode).toBe('enforce');
     expect(result.isEnforced).toBe(true);
     expect(result.isValid).toBe(true); // expires in 2099
     expect(result.notarySeal).not.toBeNull();
@@ -92,7 +91,7 @@ describe('parseResponse', () => {
       reason_code: 'OK',
       evaluated_at: '2020-01-01T00:00:00+00:00',
       expires_at: '2020-01-01T00:05:00+00:00', // In the past
-      executable: true,
+      enforcement_mode: 'enforce',
     };
 
     const result = parseResponse(raw);
@@ -105,12 +104,11 @@ describe('parseResponse', () => {
       reason_code: 'OK',
       evaluated_at: '2026-02-10T08:00:00+00:00',
       enforcement_mode: 'log_only',
-      executable: false,
     };
 
     const result = parseResponse(raw);
     expect(result.isEnforced).toBe(false);
-    expect(result.executable).toBe(false);
+    expect(result.enforcementMode).toBe('log_only');
   });
 
   it('handles simulated response', () => {
@@ -120,13 +118,13 @@ describe('parseResponse', () => {
       evaluated_at: '2026-02-10T08:00:00+00:00',
       simulated: true,
       notary_seal: null,
-      executable: false,
+      enforcement_mode: 'enforce',
     };
 
     const result = parseResponse(raw);
     expect(result.simulated).toBe(true);
     expect(result.notarySeal).toBeNull();
-    expect(result.executable).toBe(false);
+    expect(result.enforcementMode).toBe('enforce');
   });
 
   it('parses evaluation trace', () => {

@@ -17,23 +17,6 @@ DEFAULT_SANDBOX_CONFIG = {
     "allowed_vendors": None,               # None = all vendors allowed
 }
 
-SANDBOX_PAYMENT = {
-    "iban": "XX00SANDBOX0000000001",
-    "bic": "SANDBOXXXX",
-    "name": "Sandbox Vendor",
-}
-# NOTE: Sandbox currently returns payment-related fields (payment, executable)
-# for compatibility with the current server API response shape.
-# These fields are DEPRECATED and will be removed when the server API
-# drops payment_instruction from authorization responses (see
-# KORA_REMOVE_PAYMENT_INSTRUCTION.md). When that happens:
-#   - Delete this SANDBOX_PAYMENT dict
-#   - Delete _build_sandbox_payment()
-#   - Remove "payment" and "executable" keys from spend() return dict
-# Real vendor routing (IBANs, Stripe IDs, etc.) is a V2 executor concern.
-# These values are obviously fake and cannot be confused with real accounts.
-
-
 class SandboxEngine:
     """In-memory authorization simulator. Zero network calls."""
 
@@ -152,7 +135,6 @@ class SandboxEngine:
         self.monthly_spent += amount_cents
         self.tx_count += 1
 
-        short_id = uuid.uuid4().hex[:8]
         sig_hex = uuid.uuid4().hex
         expires = now + timedelta(seconds=300)
         expires_iso = expires.strftime("%Y-%m-%dT%H:%M:%S.") + f"{expires.microsecond // 1000:03d}Z"
@@ -165,12 +147,6 @@ class SandboxEngine:
             "message": f"Approved: {self._format_euros(amount_cents)} to {vendor}",
             "suggestion": None,
             "retry_with": None,
-            # FORWARD-COMPAT: payment + executable will be removed in next change.
-            # _build_sandbox_payment() isolates this so removal is one-line.
-            "payment": self._build_sandbox_payment(short_id),
-            "executable": True,
-            # These fields are added for forward-compat with the upcoming
-            # payment_instruction removal. They echo the authorization tuple.
             "enforcement_mode": "enforce",
             "amount_cents": amount_cents,
             "currency": currency,
@@ -199,17 +175,6 @@ class SandboxEngine:
             },
         }
 
-    @staticmethod
-    def _build_sandbox_payment(short_id: str) -> dict:
-        """Build sandbox payment details. Isolated for easy removal
-        when payment_instruction is removed from API response."""
-        return {
-            "iban": SANDBOX_PAYMENT["iban"],
-            "bic": SANDBOX_PAYMENT["bic"],
-            "name": SANDBOX_PAYMENT["name"],
-            "reference": f"KORA-SANDBOX-{short_id}",
-        }
-
     def _build_denied(self, decision_id, now_iso, amount_cents, currency, vendor,
                       reason_code, message, suggestion, retry_with):
         return {
@@ -220,14 +185,20 @@ class SandboxEngine:
             "message": message,
             "suggestion": suggestion,
             "retry_with": retry_with,
-            "payment": None,
-            "executable": False,
+            "enforcement_mode": "enforce",
+            "amount_cents": amount_cents,
+            "currency": currency,
+            "vendor_id": vendor,
             "seal": None,
             "raw": {
                 "sandbox": True,
                 "decision": "DENIED",
                 "decision_id": decision_id,
                 "reason_code": reason_code,
+                "enforcement_mode": "enforce",
+                "amount_cents": amount_cents,
+                "currency": currency,
+                "vendor_id": vendor,
                 "evaluated_at": now_iso,
                 "limits_current": {
                     "daily_spent_cents": self.daily_spent,

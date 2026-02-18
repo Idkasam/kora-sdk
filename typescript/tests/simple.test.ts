@@ -99,12 +99,7 @@ function makeApprovedResult(): AuthorizationResult {
     },
     limitsAfterApproval: null,
     limitsCurrent: null,
-    paymentInstruction: {
-      recipientIban: 'DE89370400440532013000',
-      recipientBic: 'COBADEFFXXX',
-      recipientName: 'AWS Inc',
-      paymentReference: undefined,
-    },
+    paymentInstruction: null,
     denial: null,
     evaluationTrace: null,
     traceUrl: '/v1/authorizations/dec-123/trace',
@@ -187,13 +182,13 @@ describe('Kora.spend — result mapping', () => {
     expect(r.retryWith).toEqual({ amount_cents: 1200 });
   });
 
-  it('APPROVED → payment from paymentInstruction', async () => {
+  it('APPROVED → enforcementMode, amountCents, currency, vendorId populated', async () => {
     const kora = makeMockKora(makeApprovedResult());
     const r = await kora.spend('aws', 5000, 'EUR');
-    expect(r.payment).not.toBeNull();
-    expect(r.payment!.iban).toBe('DE89370400440532013000');
-    expect(r.payment!.bic).toBe('COBADEFFXXX');
-    expect(r.payment!.name).toBe('AWS Inc');
+    expect(r.enforcementMode).toBe('enforce');
+    expect(r.amountCents).toBe(5000);
+    expect(r.currency).toBe('EUR');
+    expect(r.vendorId).toBe('aws');
   });
 
   it('APPROVED → seal is present', async () => {
@@ -292,7 +287,7 @@ describe('package exports', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildSpendResult — response version compat', () => {
-  it('handles old response shape (has payment_instruction, no amount_cents at root)', () => {
+  it('handles old response shape (has payment_instruction for backward-compat fallback)', () => {
     const oldResponse = {
       decision_id: 'a1b2c3d4',
       intent_id: 'e5f6a7b8',
@@ -311,7 +306,7 @@ describe('buildSpendResult — response version compat', () => {
         amount_cents: 5000,
         currency: 'EUR',
       },
-      executable: true,
+      enforcement_mode: 'enforce',
       notary_seal: { algorithm: 'Ed25519', signature: 'abc123' },
       limits_after_approval: {
         daily_remaining_cents: 95000,
@@ -323,19 +318,17 @@ describe('buildSpendResult — response version compat', () => {
     expect(result.decisionId).toBe('a1b2c3d4');
     expect(result.decision).toBe('APPROVED');
     expect(result.reasonCode).toBe('OK');
-    expect(result.payment).not.toBeNull();
-    expect(result.payment!.iban).toBe('DE89370400440532013000');
-    expect(result.payment!.bic).toBe('COBADEFFXXX');
-    expect(result.payment!.name).toBe('AWS EMEA SARL');
-    expect(result.payment!.reference).toBe('KORA-a1b2c3d4-MV1');
-    expect(result.executable).toBe(true);
+    expect(result.enforcementMode).toBe('enforce');
+    // amount_cents/currency fall back from payment_instruction
+    expect(result.amountCents).toBe(5000);
+    expect(result.currency).toBe('EUR');
     expect(result.seal).not.toBeNull();
     expect((result.seal as any).algorithm).toBe('Ed25519');
     expect(result.raw).toBe(oldResponse);
   });
 
-  it('handles future response shape (no payment_instruction, has enforcement_mode)', () => {
-    const futureResponse = {
+  it('handles current response shape (has enforcement_mode, amount_cents, currency, vendor_id)', () => {
+    const currentResponse = {
       decision_id: 'a1b2c3d4',
       intent_id: 'e5f6a7b8',
       decision: 'APPROVED',
@@ -355,13 +348,15 @@ describe('buildSpendResult — response version compat', () => {
         monthly_remaining_cents: 495000,
       },
     };
-    const result = buildSpendResult(futureResponse);
+    const result = buildSpendResult(currentResponse);
     expect(result.approved).toBe(true);
     expect(result.decisionId).toBe('a1b2c3d4');
-    expect(result.payment).toBeNull();
-    expect(result.executable).toBe(true);
+    expect(result.enforcementMode).toBe('enforce');
+    expect(result.amountCents).toBe(5000);
+    expect(result.currency).toBe('EUR');
+    expect(result.vendorId).toBe('aws');
     expect(result.seal).not.toBeNull();
-    expect(result.raw).toBe(futureResponse);
+    expect(result.raw).toBe(currentResponse);
   });
 
   it('denied response with denial sub-object extracts message/suggestion/retryWith', () => {
@@ -369,30 +364,38 @@ describe('buildSpendResult — response version compat', () => {
       decision_id: 'dec-999',
       decision: 'DENIED',
       reason_code: 'DAILY_LIMIT_EXCEEDED',
+      enforcement_mode: 'enforce',
+      amount_cents: 50000,
+      currency: 'EUR',
+      vendor_id: 'aws',
       denial: {
         message: 'Daily limit exceeded.',
         hint: 'Reduce amount to 1200.',
         actionable: { available_cents: 1200 },
       },
-      executable: false,
     };
     const result = buildSpendResult(deniedResponse);
     expect(result.approved).toBe(false);
     expect(result.message).toBe('Daily limit exceeded.');
     expect(result.suggestion).toBe('Reduce amount to 1200.');
     expect(result.retryWith).toEqual({ amount_cents: 1200 });
-    expect(result.payment).toBeNull();
+    expect(result.enforcementMode).toBe('enforce');
+    expect(result.amountCents).toBe(50000);
+    expect(result.currency).toBe('EUR');
+    expect(result.vendorId).toBe('aws');
     expect(result.seal).toBeNull();
-    expect(result.executable).toBe(false);
   });
 
-  it('missing executable field defaults to true (forward-compat)', () => {
+  it('missing enforcement_mode defaults to enforce (forward-compat)', () => {
     const response = {
       decision_id: 'dec-100',
       decision: 'APPROVED',
       reason_code: 'OK',
     };
     const result = buildSpendResult(response);
-    expect(result.executable).toBe(true);
+    expect(result.enforcementMode).toBe('enforce');
+    expect(result.amountCents).toBeNull();
+    expect(result.currency).toBeNull();
+    expect(result.vendorId).toBeNull();
   });
 });

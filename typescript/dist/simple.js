@@ -1,37 +1,68 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Kora = void 0;
+exports.buildSpendResult = buildSpendResult;
 const client_js_1 = require("./client.js");
 const crypto_js_1 = require("./crypto.js");
 const errors_js_1 = require("./errors.js");
 const format_js_1 = require("./format.js");
+const sandbox_js_1 = require("./sandbox.js");
 const DEFAULT_BASE_URL = 'https://api.koraprotocol.com';
 // ---------------------------------------------------------------------------
 // Simplified Kora class
 // ---------------------------------------------------------------------------
 class Kora {
     engine;
+    sandboxEngine;
+    _sandbox;
     mandate;
     agentId;
     signingKey;
     baseUrl;
     logDenials;
-    constructor(config) {
-        const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
-        this.engine = new client_js_1.Kora(config.secret, { baseUrl });
-        this.mandate = config.mandate;
-        this.baseUrl = baseUrl;
+    constructor(config = {}) {
+        // Environment variable activation
+        const sandbox = config.sandbox
+            || (typeof process !== 'undefined'
+                && ['true', '1'].includes((process.env.KORA_SANDBOX ?? '').toLowerCase()));
+        this._sandbox = sandbox;
+        this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
         this.logDenials = config.logDenials ?? true;
-        // Extract agent credentials for budget signing
-        const parsed = (0, crypto_js_1.parseAgentKey)(config.secret);
-        this.agentId = parsed.agentId;
-        this.signingKey = parsed.signingKey;
+        if (sandbox) {
+            this.engine = null;
+            this.sandboxEngine = new sandbox_js_1.SandboxEngine(config.sandboxConfig);
+            this.mandate = 'sandbox_mandate';
+            this.agentId = 'sandbox_agent';
+            this.signingKey = null;
+        }
+        else {
+            if (!config.secret) {
+                throw new Error('secret is required when sandbox is not enabled');
+            }
+            if (!config.mandate) {
+                throw new Error('mandate is required when sandbox is not enabled');
+            }
+            this.engine = new client_js_1.Kora(config.secret, { baseUrl: this.baseUrl });
+            this.sandboxEngine = null;
+            this.mandate = config.mandate;
+            const parsed = (0, crypto_js_1.parseAgentKey)(config.secret);
+            this.agentId = parsed.agentId;
+            this.signingKey = parsed.signingKey;
+        }
     }
     /**
      * Request authorization to spend.
      * Signs and submits to /v1/authorize.
      */
     async spend(vendor, amountCents, currency, reason) {
+        if (this._sandbox) {
+            const raw = this.sandboxEngine.spend(vendor, amountCents, currency, reason);
+            const spendResult = buildSpendResult(raw);
+            if (!spendResult.approved && this.logDenials) {
+                this.logDenialSimple(spendResult, vendor, amountCents, currency);
+            }
+            return spendResult;
+        }
         const params = {
             mandate: this.mandate,
             amount: amountCents,
@@ -66,7 +97,7 @@ class Kora {
                 reference: pi.paymentReference ?? null,
             };
         }
-        const spendResult = {
+        const spendResult = buildSpendResult({
             approved,
             decisionId: result.decisionId,
             decision: result.decision,
@@ -78,7 +109,7 @@ class Kora {
             executable: result.executable,
             seal: result.notarySeal,
             raw: result,
-        };
+        });
         // Stderr denial logging
         if (!approved && this.logDenials) {
             this.logDenial(spendResult, vendor, amountCents, currency, result);
@@ -86,10 +117,23 @@ class Kora {
         return spendResult;
     }
     /**
+     * Reset all sandbox counters to zero. Only works in sandbox mode.
+     */
+    sandboxReset() {
+        if (!this._sandbox) {
+            throw new Error('sandboxReset() is only available in sandbox mode');
+        }
+        this.sandboxEngine.reset();
+    }
+    /**
      * Check current budget for the configured mandate.
      * Signs and submits to /v1/mandates/:id/budget.
      */
     async checkBudget() {
+        if (this._sandbox) {
+            const raw = this.sandboxEngine.getBudget();
+            return parseBudgetResult(raw);
+        }
         const body = { mandate_id: this.mandate };
         const canonical = (0, crypto_js_1.canonicalize)(body);
         const signature = (0, crypto_js_1.sign)(canonical, this.signingKey);
@@ -112,6 +156,21 @@ class Kora {
         }
         const raw = await response.json();
         return parseBudgetResult(raw);
+    }
+    logDenialSimple(spendResult, vendor, amountCents, currency) {
+        const parts = [
+            'KORA_DENIAL',
+            `agent=${this.agentId}`,
+            `mandate=${this.mandate}`,
+            `vendor=${vendor}`,
+            `amount=${amountCents}`,
+            `currency=${currency}`,
+            `reason=${spendResult.reasonCode}`,
+        ];
+        if (spendResult.retryWith) {
+            parts.push(`remaining_cents=${spendResult.retryWith.amount_cents}`);
+        }
+        console.error(parts.join(' '));
     }
     logDenial(spendResult, vendor, amountCents, currency, engineResult) {
         const parts = [
@@ -136,6 +195,68 @@ exports.Kora = Kora;
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+/**
+ * Build SpendResult from a response dict.
+ *
+ * Tolerant of missing/extra fields — handles both current API shape
+ * (payment_instruction, notary_seal, denial) and future shape
+ * (no payment_instruction, enforcement_mode at root).
+ * Used by spend() and sandbox.
+ */
+function buildSpendResult(raw) {
+    const approved = raw.approved ?? (raw.decision === 'APPROVED');
+    // Message: direct or from denial
+    let message = raw.message ?? '';
+    if (!message) {
+        const denial = raw.denial;
+        if (denial?.message) {
+            message = denial.message;
+        }
+        else {
+            const rc = raw.reason_code ?? raw.reasonCode ?? '';
+            message = approved ? `Approved: ${rc}` : `Denied: ${rc}`;
+        }
+    }
+    // Suggestion: direct or from denial.hint
+    let suggestion = raw.suggestion ?? null;
+    if (suggestion === null && raw.denial?.hint) {
+        suggestion = raw.denial.hint;
+    }
+    // retry_with: direct or from denial.actionable
+    let retryWith = raw.retry_with ?? raw.retryWith ?? null;
+    if (retryWith === null && raw.denial?.actionable) {
+        const available = raw.denial.actionable.available_cents;
+        if (available != null && available > 0) {
+            retryWith = { amount_cents: available };
+        }
+    }
+    // Payment: from payment_instruction (API) or paymentInstruction (TS obj) or payment (sandbox)
+    const paymentData = raw.payment_instruction ?? raw.paymentInstruction ?? raw.payment ?? null;
+    let payment = null;
+    if (paymentData && typeof paymentData === 'object') {
+        payment = {
+            iban: paymentData.iban ?? paymentData.recipient_iban ?? paymentData.recipientIban ?? '',
+            bic: paymentData.bic ?? paymentData.recipient_bic ?? paymentData.recipientBic ?? '',
+            name: paymentData.name ?? paymentData.recipient_name ?? paymentData.recipientName ?? '',
+            reference: paymentData.reference ?? paymentData.payment_reference ?? paymentData.paymentReference ?? null,
+        };
+    }
+    // Seal: from seal (sandbox) or notary_seal (API) or notarySeal (TS obj)
+    const seal = raw.seal ?? raw.notary_seal ?? raw.notarySeal ?? null;
+    return {
+        approved,
+        decisionId: raw.decision_id ?? raw.decisionId ?? '',
+        decision: raw.decision ?? '',
+        reasonCode: raw.reason_code ?? raw.reasonCode ?? '',
+        message,
+        suggestion,
+        retryWith,
+        payment,
+        executable: raw.executable ?? true,
+        seal,
+        raw: raw.raw ?? raw,
+    };
+}
 function parseBudgetResult(raw) {
     const daily = raw.daily;
     const monthly = raw.monthly;
