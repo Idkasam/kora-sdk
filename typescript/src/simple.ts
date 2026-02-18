@@ -9,6 +9,8 @@ import { Kora as KoraEngine } from './client.js';
 import { parseAgentKey, canonicalize, sign } from './crypto.js';
 import { KoraError } from './errors.js';
 import { formatAmount } from './format.js';
+import { SandboxEngine } from './sandbox.js';
+import type { SandboxConfig } from './sandbox.js';
 import type { AuthorizationResult } from './types.js';
 
 const DEFAULT_BASE_URL = 'https://api.koraprotocol.com';
@@ -72,10 +74,12 @@ export interface BudgetResult {
 }
 
 export interface KoraConfig {
-  secret: string;
-  mandate: string;
+  secret?: string;
+  mandate?: string;
   baseUrl?: string;
   logDenials?: boolean;
+  sandbox?: boolean;
+  sandboxConfig?: SandboxConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -83,24 +87,45 @@ export interface KoraConfig {
 // ---------------------------------------------------------------------------
 
 export class Kora {
-  private readonly engine: KoraEngine;
+  private readonly engine: KoraEngine | null;
+  private readonly sandboxEngine: SandboxEngine | null;
+  private readonly _sandbox: boolean;
   private readonly mandate: string;
   private readonly agentId: string;
-  private readonly signingKey: Uint8Array;
+  private readonly signingKey: Uint8Array | null;
   private readonly baseUrl: string;
   private readonly logDenials: boolean;
 
-  constructor(config: KoraConfig) {
-    const baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
-    this.engine = new KoraEngine(config.secret, { baseUrl });
-    this.mandate = config.mandate;
-    this.baseUrl = baseUrl;
+  constructor(config: KoraConfig = {}) {
+    // Environment variable activation
+    const sandbox = config.sandbox
+      || (typeof process !== 'undefined'
+        && ['true', '1'].includes((process.env.KORA_SANDBOX ?? '').toLowerCase()));
+
+    this._sandbox = sandbox;
+    this.baseUrl = config.baseUrl ?? DEFAULT_BASE_URL;
     this.logDenials = config.logDenials ?? true;
 
-    // Extract agent credentials for budget signing
-    const parsed = parseAgentKey(config.secret);
-    this.agentId = parsed.agentId;
-    this.signingKey = parsed.signingKey;
+    if (sandbox) {
+      this.engine = null;
+      this.sandboxEngine = new SandboxEngine(config.sandboxConfig);
+      this.mandate = 'sandbox_mandate';
+      this.agentId = 'sandbox_agent';
+      this.signingKey = null;
+    } else {
+      if (!config.secret) {
+        throw new Error('secret is required when sandbox is not enabled');
+      }
+      if (!config.mandate) {
+        throw new Error('mandate is required when sandbox is not enabled');
+      }
+      this.engine = new KoraEngine(config.secret, { baseUrl: this.baseUrl });
+      this.sandboxEngine = null;
+      this.mandate = config.mandate;
+      const parsed = parseAgentKey(config.secret);
+      this.agentId = parsed.agentId;
+      this.signingKey = parsed.signingKey;
+    }
   }
 
   /**
@@ -113,6 +138,15 @@ export class Kora {
     currency: string,
     reason?: string,
   ): Promise<SpendResult> {
+    if (this._sandbox) {
+      const raw = this.sandboxEngine!.spend(vendor, amountCents, currency, reason);
+      const spendResult = buildSpendResult(raw);
+      if (!spendResult.approved && this.logDenials) {
+        this.logDenialSimple(spendResult, vendor, amountCents, currency);
+      }
+      return spendResult;
+    }
+
     const params: Record<string, unknown> = {
       mandate: this.mandate,
       amount: amountCents,
@@ -123,7 +157,7 @@ export class Kora {
       (params as Record<string, unknown>).purpose = reason;
     }
 
-    const result: AuthorizationResult = await this.engine.authorize(
+    const result: AuthorizationResult = await this.engine!.authorize(
       params as any,
     );
 
@@ -156,7 +190,7 @@ export class Kora {
       };
     }
 
-    const spendResult: SpendResult = {
+    const spendResult = buildSpendResult({
       approved,
       decisionId: result.decisionId,
       decision: result.decision,
@@ -168,7 +202,7 @@ export class Kora {
       executable: result.executable,
       seal: result.notarySeal as object | null,
       raw: result as unknown as object,
-    };
+    });
 
     // Stderr denial logging
     if (!approved && this.logDenials) {
@@ -179,13 +213,28 @@ export class Kora {
   }
 
   /**
+   * Reset all sandbox counters to zero. Only works in sandbox mode.
+   */
+  sandboxReset(): void {
+    if (!this._sandbox) {
+      throw new Error('sandboxReset() is only available in sandbox mode');
+    }
+    this.sandboxEngine!.reset();
+  }
+
+  /**
    * Check current budget for the configured mandate.
    * Signs and submits to /v1/mandates/:id/budget.
    */
   async checkBudget(): Promise<BudgetResult> {
+    if (this._sandbox) {
+      const raw = this.sandboxEngine!.getBudget();
+      return parseBudgetResult(raw);
+    }
+
     const body = { mandate_id: this.mandate };
     const canonical = canonicalize(body as Record<string, unknown>);
-    const signature = sign(canonical, this.signingKey);
+    const signature = sign(canonical, this.signingKey!);
 
     const response = await fetch(
       `${this.baseUrl}/v1/mandates/${this.mandate}/budget`,
@@ -216,6 +265,29 @@ export class Kora {
 
     const raw = await response.json();
     return parseBudgetResult(raw);
+  }
+
+  private logDenialSimple(
+    spendResult: SpendResult,
+    vendor: string,
+    amountCents: number,
+    currency: string,
+  ): void {
+    const parts: string[] = [
+      'KORA_DENIAL',
+      `agent=${this.agentId}`,
+      `mandate=${this.mandate}`,
+      `vendor=${vendor}`,
+      `amount=${amountCents}`,
+      `currency=${currency}`,
+      `reason=${spendResult.reasonCode}`,
+    ];
+
+    if (spendResult.retryWith) {
+      parts.push(`remaining_cents=${spendResult.retryWith.amount_cents}`);
+    }
+
+    console.error(parts.join(' '));
   }
 
   private logDenial(
@@ -250,6 +322,74 @@ export class Kora {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Build SpendResult from a response dict.
+ *
+ * Tolerant of missing/extra fields — handles both current API shape
+ * (payment_instruction, notary_seal, denial) and future shape
+ * (no payment_instruction, enforcement_mode at root).
+ * Used by spend() and sandbox.
+ */
+export function buildSpendResult(raw: Record<string, any>): SpendResult {
+  const approved = raw.approved ?? (raw.decision === 'APPROVED');
+
+  // Message: direct or from denial
+  let message: string = raw.message ?? '';
+  if (!message) {
+    const denial = raw.denial;
+    if (denial?.message) {
+      message = denial.message;
+    } else {
+      const rc = raw.reason_code ?? raw.reasonCode ?? '';
+      message = approved ? `Approved: ${rc}` : `Denied: ${rc}`;
+    }
+  }
+
+  // Suggestion: direct or from denial.hint
+  let suggestion: string | null = raw.suggestion ?? null;
+  if (suggestion === null && raw.denial?.hint) {
+    suggestion = raw.denial.hint;
+  }
+
+  // retry_with: direct or from denial.actionable
+  let retryWith: { amount_cents: number } | null = raw.retry_with ?? raw.retryWith ?? null;
+  if (retryWith === null && raw.denial?.actionable) {
+    const available = raw.denial.actionable.available_cents;
+    if (available != null && available > 0) {
+      retryWith = { amount_cents: available };
+    }
+  }
+
+  // Payment: from payment_instruction (API) or paymentInstruction (TS obj) or payment (sandbox)
+  const paymentData = raw.payment_instruction ?? raw.paymentInstruction ?? raw.payment ?? null;
+  let payment: SpendResult['payment'] = null;
+  if (paymentData && typeof paymentData === 'object') {
+    payment = {
+      iban: paymentData.iban ?? paymentData.recipient_iban ?? paymentData.recipientIban ?? '',
+      bic: paymentData.bic ?? paymentData.recipient_bic ?? paymentData.recipientBic ?? '',
+      name: paymentData.name ?? paymentData.recipient_name ?? paymentData.recipientName ?? '',
+      reference: paymentData.reference ?? paymentData.payment_reference ?? paymentData.paymentReference ?? null,
+    };
+  }
+
+  // Seal: from seal (sandbox) or notary_seal (API) or notarySeal (TS obj)
+  const seal = raw.seal ?? raw.notary_seal ?? raw.notarySeal ?? null;
+
+  return {
+    approved,
+    decisionId: raw.decision_id ?? raw.decisionId ?? '',
+    decision: raw.decision ?? '',
+    reasonCode: raw.reason_code ?? raw.reasonCode ?? '',
+    message,
+    suggestion,
+    retryWith,
+    payment,
+    executable: raw.executable ?? true,
+    seal,
+    raw: raw.raw ?? raw,
+  };
+}
 
 function parseBudgetResult(raw: Record<string, any>): BudgetResult {
   const daily = raw.daily;

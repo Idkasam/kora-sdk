@@ -6,7 +6,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { formatAmount } from '../src/format.js';
-import { Kora, type SpendResult, type BudgetResult, type KoraConfig } from '../src/simple.js';
+import { Kora, buildSpendResult, type SpendResult, type BudgetResult, type KoraConfig } from '../src/simple.js';
 import { Kora as KoraEngine } from '../src/client.js';
 import type { AuthorizationResult } from '../src/types.js';
 
@@ -284,5 +284,115 @@ describe('package exports', () => {
   it('formatAmount is exported and works', async () => {
     const { formatAmount: fa } = await import('../src/index.js');
     expect(fa(5000, 'EUR')).toBe('€50.00');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response version compatibility (B.6.1)
+// ---------------------------------------------------------------------------
+
+describe('buildSpendResult — response version compat', () => {
+  it('handles old response shape (has payment_instruction, no amount_cents at root)', () => {
+    const oldResponse = {
+      decision_id: 'a1b2c3d4',
+      intent_id: 'e5f6a7b8',
+      decision: 'APPROVED',
+      reason_code: 'OK',
+      mandate_id: 'mandate_abc',
+      mandate_version: 1,
+      evaluated_at: '2026-02-18T12:00:00.000Z',
+      expires_at: '2026-02-18T12:05:00.000Z',
+      ttl_seconds: 300,
+      payment_instruction: {
+        recipient_iban: 'DE89370400440532013000',
+        recipient_name: 'AWS EMEA SARL',
+        recipient_bic: 'COBADEFFXXX',
+        reference: 'KORA-a1b2c3d4-MV1',
+        amount_cents: 5000,
+        currency: 'EUR',
+      },
+      executable: true,
+      notary_seal: { algorithm: 'Ed25519', signature: 'abc123' },
+      limits_after_approval: {
+        daily_remaining_cents: 95000,
+        monthly_remaining_cents: 495000,
+      },
+    };
+    const result = buildSpendResult(oldResponse);
+    expect(result.approved).toBe(true);
+    expect(result.decisionId).toBe('a1b2c3d4');
+    expect(result.decision).toBe('APPROVED');
+    expect(result.reasonCode).toBe('OK');
+    expect(result.payment).not.toBeNull();
+    expect(result.payment!.iban).toBe('DE89370400440532013000');
+    expect(result.payment!.bic).toBe('COBADEFFXXX');
+    expect(result.payment!.name).toBe('AWS EMEA SARL');
+    expect(result.payment!.reference).toBe('KORA-a1b2c3d4-MV1');
+    expect(result.executable).toBe(true);
+    expect(result.seal).not.toBeNull();
+    expect((result.seal as any).algorithm).toBe('Ed25519');
+    expect(result.raw).toBe(oldResponse);
+  });
+
+  it('handles future response shape (no payment_instruction, has enforcement_mode)', () => {
+    const futureResponse = {
+      decision_id: 'a1b2c3d4',
+      intent_id: 'e5f6a7b8',
+      decision: 'APPROVED',
+      reason_code: 'OK',
+      mandate_id: 'mandate_abc',
+      mandate_version: 1,
+      amount_cents: 5000,
+      currency: 'EUR',
+      vendor_id: 'aws',
+      enforcement_mode: 'enforce',
+      evaluated_at: '2026-02-18T12:00:00.000Z',
+      expires_at: '2026-02-18T12:05:00.000Z',
+      ttl_seconds: 300,
+      notary_seal: { algorithm: 'Ed25519', signature: 'abc123' },
+      limits_after_approval: {
+        daily_remaining_cents: 95000,
+        monthly_remaining_cents: 495000,
+      },
+    };
+    const result = buildSpendResult(futureResponse);
+    expect(result.approved).toBe(true);
+    expect(result.decisionId).toBe('a1b2c3d4');
+    expect(result.payment).toBeNull();
+    expect(result.executable).toBe(true);
+    expect(result.seal).not.toBeNull();
+    expect(result.raw).toBe(futureResponse);
+  });
+
+  it('denied response with denial sub-object extracts message/suggestion/retryWith', () => {
+    const deniedResponse = {
+      decision_id: 'dec-999',
+      decision: 'DENIED',
+      reason_code: 'DAILY_LIMIT_EXCEEDED',
+      denial: {
+        message: 'Daily limit exceeded.',
+        hint: 'Reduce amount to 1200.',
+        actionable: { available_cents: 1200 },
+      },
+      executable: false,
+    };
+    const result = buildSpendResult(deniedResponse);
+    expect(result.approved).toBe(false);
+    expect(result.message).toBe('Daily limit exceeded.');
+    expect(result.suggestion).toBe('Reduce amount to 1200.');
+    expect(result.retryWith).toEqual({ amount_cents: 1200 });
+    expect(result.payment).toBeNull();
+    expect(result.seal).toBeNull();
+    expect(result.executable).toBe(false);
+  });
+
+  it('missing executable field defaults to true (forward-compat)', () => {
+    const response = {
+      decision_id: 'dec-100',
+      decision: 'APPROVED',
+      reason_code: 'OK',
+    };
+    const result = buildSpendResult(response);
+    expect(result.executable).toBe(true);
   });
 });

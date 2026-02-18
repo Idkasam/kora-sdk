@@ -1,6 +1,7 @@
 export { Kora as KoraEngine, parseResponse } from './client.js';
 export { Kora } from './simple.js';
 export type { KoraConfig, SpendResult, BudgetResult } from './simple.js';
+export type { SandboxConfig } from './sandbox.js';
 export { KoraAuto } from './auto.js';
 export type { KoraAutoConfig, ObserveParams } from './auto.js';
 export { KoraError, KoraDenialError } from './errors.js';

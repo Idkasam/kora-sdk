@@ -104,21 +104,46 @@ class Kora:
         mandate: Default mandate ID for all operations
         base_url: Kora API base URL
         log_denials: Emit KORA_DENIAL to stderr on denied results (default: True)
+        sandbox: Run in sandbox mode (no network, in-memory limits)
+        sandbox_config: Override default sandbox limits (see SandboxEngine)
     """
+
+    # Class-level default so mocked instances (bypassing __init__) still work
+    _sandbox = False
 
     def __init__(
         self,
-        secret: str,
-        mandate: str,
+        secret: str = None,
+        mandate: str = None,
         base_url: str = _DEFAULT_BASE_URL,
         log_denials: bool = True,
+        sandbox: bool = False,
+        sandbox_config: dict = None,
     ):
-        self._engine = KoraEngine(secret, base_url=base_url)
-        self._mandate = mandate
-        self._agent_id = self._engine._agent_id
-        self._signing_key = self._engine._signing_key
-        self._base_url = base_url
+        # Environment variable activation
+        sandbox = sandbox or os.environ.get("KORA_SANDBOX", "").lower() in ("true", "1")
+
+        self._sandbox = sandbox
         self._log_denials = log_denials
+        self._base_url = base_url
+
+        if sandbox:
+            from .kora_sandbox import SandboxEngine
+            self._engine = None
+            self._sandbox_engine = SandboxEngine(sandbox_config)
+            self._mandate = "sandbox_mandate"
+            self._agent_id = "sandbox_agent"
+            self._signing_key = None
+        else:
+            if not secret:
+                raise ValueError("secret is required when sandbox=False")
+            if not mandate:
+                raise ValueError("mandate is required when sandbox=False")
+            self._engine = KoraEngine(secret, base_url=base_url)
+            self._sandbox_engine = None
+            self._mandate = mandate
+            self._agent_id = self._engine._agent_id
+            self._signing_key = self._engine._signing_key
 
     def spend(
         self,
@@ -132,6 +157,13 @@ class Kora:
         Signs and submits to /v1/authorize via the underlying KoraEngine.
         On DENIED results, emits a structured KORA_DENIAL log line to stderr.
         """
+        if self._sandbox:
+            raw = self._sandbox_engine.spend(vendor, amount_cents, currency, reason)
+            spend_result = _build_spend_result(raw)
+            if not spend_result.approved and self._log_denials:
+                self._log_denial(spend_result, vendor, amount_cents, currency)
+            return spend_result
+
         # Build kwargs for engine.authorize()
         kwargs: dict[str, Any] = {
             "mandate": self._mandate,
@@ -143,9 +175,8 @@ class Kora:
             kwargs["purpose"] = reason
 
         result = self._engine.authorize(**kwargs)
-        raw = _build_raw_dict(result)
 
-        # Build SpendResult
+        # Pre-compute message (needs input params for format_amount)
         if result.approved:
             message = f"Approved: {format_amount(amount_cents, currency)} to {vendor}"
         else:
@@ -179,19 +210,19 @@ class Kora:
                 "timestamp": result.notary_seal.timestamp,
             }
 
-        spend_result = SpendResult(
-            approved=result.approved,
-            decision_id=result.decision_id,
-            decision=result.decision,
-            reason_code=result.reason_code,
-            message=message,
-            suggestion=suggestion,
-            retry_with=retry_with,
-            payment=payment,
-            executable=result.executable,
-            seal=seal,
-            raw=raw,
-        )
+        spend_result = _build_spend_result({
+            "approved": result.approved,
+            "decision_id": result.decision_id,
+            "decision": result.decision,
+            "reason_code": result.reason_code,
+            "message": message,
+            "suggestion": suggestion,
+            "retry_with": retry_with,
+            "payment": payment,
+            "executable": result.executable,
+            "seal": seal,
+            "raw": _build_raw_dict(result),
+        })
 
         # Stderr denial logging
         if not result.approved and self._log_denials:
@@ -199,11 +230,21 @@ class Kora:
 
         return spend_result
 
+    def sandbox_reset(self) -> None:
+        """Reset all sandbox counters to zero. Only works in sandbox mode."""
+        if not self._sandbox:
+            raise RuntimeError("sandbox_reset() is only available in sandbox mode")
+        self._sandbox_engine.reset()
+
     def check_budget(self) -> BudgetResult:
         """Check current budget for the configured mandate.
 
         Signs and submits to /v1/mandates/:id/budget.
         """
+        if self._sandbox:
+            raw = self._sandbox_engine.get_budget()
+            return _parse_budget_result(raw)
+
         body = {"mandate_id": self._mandate}
         canonical = canonicalize(body)
         signature = sign_message(canonical, self._signing_key)
@@ -242,7 +283,7 @@ class Kora:
         vendor: str,
         amount_cents: int,
         currency: str,
-        engine_result: Any,
+        engine_result: Any = None,
     ) -> None:
         """Emit structured KORA_DENIAL log line to stderr."""
         parts = [
@@ -259,8 +300,8 @@ class Kora:
         if spend_result.retry_with:
             parts.append(f"remaining_cents={spend_result.retry_with['amount_cents']}")
 
-        # Trace URL
-        trace_url = engine_result.trace_url if engine_result.trace_url else ""
+        # Trace URL (not available in sandbox mode)
+        trace_url = engine_result.trace_url if engine_result and engine_result.trace_url else ""
         if trace_url:
             parts.append(f"trace={self._base_url}{trace_url}")
 
@@ -294,13 +335,80 @@ def _build_raw_dict(result: Any) -> dict:
     return raw
 
 
+def _build_spend_result(raw: dict) -> SpendResult:
+    """Build SpendResult from a response dict.
+
+    Tolerant of missing/extra fields — handles both current API shape
+    (payment_instruction, notary_seal, denial) and future shape
+    (no payment_instruction, enforcement_mode at root).
+    Used by spend() and sandbox.
+    """
+    approved = raw.get("approved", raw.get("decision") == "APPROVED")
+
+    # Message: direct field or extracted from denial
+    message = raw.get("message", "")
+    if not message:
+        denial = raw.get("denial")
+        if isinstance(denial, dict) and denial.get("message"):
+            message = denial["message"]
+        else:
+            rc = raw.get("reason_code", "")
+            message = f"Approved: {rc}" if approved else f"Denied: {rc}"
+
+    # Suggestion: direct or from denial.hint
+    suggestion = raw.get("suggestion")
+    if suggestion is None and isinstance(raw.get("denial"), dict):
+        suggestion = raw["denial"].get("hint")
+
+    # retry_with: direct or from denial.actionable
+    retry_with = raw.get("retry_with")
+    if retry_with is None:
+        denial = raw.get("denial")
+        if isinstance(denial, dict) and isinstance(denial.get("actionable"), dict):
+            available = denial["actionable"].get("available_cents")
+            if available is not None and available > 0:
+                retry_with = {"amount_cents": available}
+
+    # Payment: from payment_instruction (production API) or payment (sandbox/future)
+    payment_data = raw.get("payment_instruction") or raw.get("payment")
+    payment = None
+    if payment_data and isinstance(payment_data, dict):
+        payment = {
+            "iban": payment_data.get("iban") or payment_data.get("recipient_iban", ""),
+            "bic": payment_data.get("bic") or payment_data.get("recipient_bic", ""),
+            "name": payment_data.get("name") or payment_data.get("recipient_name", ""),
+            "reference": payment_data.get("reference", payment_data.get("payment_reference")),
+        }
+
+    # Seal: from seal (sandbox) or notary_seal (production API)
+    seal = raw.get("seal") or raw.get("notary_seal")
+    if isinstance(seal, dict):
+        seal = dict(seal)
+    else:
+        seal = None
+
+    return SpendResult(
+        approved=approved,
+        decision_id=raw.get("decision_id", ""),
+        decision=raw.get("decision", ""),
+        reason_code=raw.get("reason_code", ""),
+        message=message,
+        suggestion=suggestion,
+        retry_with=retry_with,
+        payment=payment,
+        executable=raw.get("executable", True),
+        seal=seal,
+        raw=raw.get("raw", raw),
+    )
+
+
 def _parse_budget_result(raw: dict) -> BudgetResult:
     """Parse raw budget API response into BudgetResult."""
     daily = raw["daily"]
     monthly = raw["monthly"]
 
     velocity = None
-    if "velocity" in raw:
+    if raw.get("velocity") is not None:
         v = raw["velocity"]
         velocity = _VelocityBudget(
             window_max_cents=v["window_max_cents"],
@@ -310,7 +418,7 @@ def _parse_budget_result(raw: dict) -> BudgetResult:
         )
 
     time_window = None
-    if "time_window" in raw:
+    if raw.get("time_window") is not None:
         tw = raw["time_window"]
         time_window = _TimeWindowBudget(
             allowed_days=tw["allowed_days"],

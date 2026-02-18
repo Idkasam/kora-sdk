@@ -16,6 +16,7 @@ from kora.kora_simple import (
     Kora,
     SpendResult,
     BudgetResult,
+    _build_spend_result,
     _parse_budget_result,
 )
 from kora.types import (
@@ -489,3 +490,114 @@ class TestExports:
     def test_format_amount_exported(self):
         from kora import format_amount
         assert format_amount(5000, "EUR") == "\u20ac50.00"
+
+
+# ---------------------------------------------------------------------------
+# Response version compatibility (B.6.1)
+# ---------------------------------------------------------------------------
+
+class TestResponseVersionCompat:
+    def test_parse_old_response_shape(self):
+        """SDK handles pre-v1.3 response (has payment_instruction, no amount_cents at root)."""
+        old_response = {
+            "decision_id": "a1b2c3d4",
+            "intent_id": "e5f6a7b8",
+            "decision": "APPROVED",
+            "reason_code": "OK",
+            "mandate_id": "mandate_abc",
+            "mandate_version": 1,
+            "evaluated_at": "2026-02-18T12:00:00.000Z",
+            "expires_at": "2026-02-18T12:05:00.000Z",
+            "ttl_seconds": 300,
+            "payment_instruction": {
+                "recipient_iban": "DE89370400440532013000",
+                "recipient_name": "AWS EMEA SARL",
+                "recipient_bic": "COBADEFFXXX",
+                "reference": "KORA-a1b2c3d4-MV1",
+                "amount_cents": 5000,
+                "currency": "EUR",
+            },
+            "executable": True,
+            "notary_seal": {"algorithm": "Ed25519", "signature": "abc123"},
+            "limits_after_approval": {
+                "daily_remaining_cents": 95000,
+                "monthly_remaining_cents": 495000,
+            },
+        }
+        result = _build_spend_result(old_response)
+        assert result.approved is True
+        assert result.decision_id == "a1b2c3d4"
+        assert result.decision == "APPROVED"
+        assert result.reason_code == "OK"
+        assert result.payment is not None
+        assert result.payment["iban"] == "DE89370400440532013000"
+        assert result.payment["bic"] == "COBADEFFXXX"
+        assert result.payment["name"] == "AWS EMEA SARL"
+        assert result.payment["reference"] == "KORA-a1b2c3d4-MV1"
+        assert result.executable is True
+        assert result.seal is not None
+        assert result.seal["algorithm"] == "Ed25519"
+        assert result.raw is old_response  # passthrough (no "raw" key in dict)
+
+    def test_parse_future_response_shape(self):
+        """SDK handles future response (no payment_instruction, has enforcement_mode/amount_cents/vendor_id)."""
+        future_response = {
+            "decision_id": "a1b2c3d4",
+            "intent_id": "e5f6a7b8",
+            "decision": "APPROVED",
+            "reason_code": "OK",
+            "mandate_id": "mandate_abc",
+            "mandate_version": 1,
+            "amount_cents": 5000,
+            "currency": "EUR",
+            "vendor_id": "aws",
+            "enforcement_mode": "enforce",
+            "evaluated_at": "2026-02-18T12:00:00.000Z",
+            "expires_at": "2026-02-18T12:05:00.000Z",
+            "ttl_seconds": 300,
+            "notary_seal": {"algorithm": "Ed25519", "signature": "abc123"},
+            "limits_after_approval": {
+                "daily_remaining_cents": 95000,
+                "monthly_remaining_cents": 495000,
+            },
+        }
+        result = _build_spend_result(future_response)
+        assert result.approved is True
+        assert result.decision_id == "a1b2c3d4"
+        assert result.payment is None  # no payment_instruction → None
+        assert result.executable is True  # defaults to True
+        assert result.seal is not None
+        assert result.seal["algorithm"] == "Ed25519"
+        assert result.raw is future_response
+
+    def test_parse_denied_with_denial_object(self):
+        """Denied response with denial sub-object extracts message/suggestion/retry_with."""
+        denied_response = {
+            "decision_id": "dec-999",
+            "decision": "DENIED",
+            "reason_code": "DAILY_LIMIT_EXCEEDED",
+            "denial": {
+                "message": "Daily limit exceeded.",
+                "hint": "Reduce amount to 1200.",
+                "actionable": {"available_cents": 1200},
+            },
+            "executable": False,
+        }
+        result = _build_spend_result(denied_response)
+        assert result.approved is False
+        assert result.message == "Daily limit exceeded."
+        assert result.suggestion == "Reduce amount to 1200."
+        assert result.retry_with == {"amount_cents": 1200}
+        assert result.payment is None
+        assert result.seal is None
+        assert result.executable is False
+
+    def test_parse_missing_executable_defaults_true(self):
+        """Missing executable field defaults to True (forward-compat)."""
+        response = {
+            "decision_id": "dec-100",
+            "decision": "APPROVED",
+            "reason_code": "OK",
+        }
+        result = _build_spend_result(response)
+        assert result.executable is True
